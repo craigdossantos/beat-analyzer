@@ -1,28 +1,67 @@
 """
-Detect the "beat drop" - the first strong downbeat after intro silence/ambient.
+Detect the "beat drop" - the first strong downbeat where bass/drums kick in.
 
-The beat drop is where the main rhythm kicks in. This module provides:
-1. Metadata-based detection (uses filename timestamps when available)
-2. Audio analysis fallback (energy-based detection)
+The beat drop is where the main rhythm kicks in. This module detects it by analyzing:
+1. Sub-bass energy (low frequencies 20-120 Hz)
+2. Percussive content (drums/kicks)
+3. Spectral changes (new frequency content appearing)
 
-For AI-generated beats with melodic intros, the metadata approach is more reliable
-since the energy profile is often consistent throughout.
+For AI-generated beats with melodic intros, this works better than overall energy
+since the intro often has similar loudness but lacks bass/drums.
 """
 import numpy as np
 import librosa
 from pathlib import Path
 from typing import Tuple, List, Optional
 
-# Import the filename parser for metadata extraction
-try:
-    from .filename_parser import parse_filename
-except ImportError:
-    parse_filename = None
+
+def compute_subbass_energy(y: np.ndarray, sr: int, hop_length: int = 512) -> np.ndarray:
+    """
+    Compute energy in the sub-bass range (20-120 Hz).
+    This is where kick drums and bass live.
+    """
+    # Use STFT to get frequency content
+    S = np.abs(librosa.stft(y, hop_length=hop_length))
+    freqs = librosa.fft_frequencies(sr=sr)
+
+    # Find bins in sub-bass range (20-120 Hz)
+    subbass_mask = (freqs >= 20) & (freqs <= 120)
+
+    # Sum energy in sub-bass range for each frame
+    subbass_energy = np.sum(S[subbass_mask, :], axis=0)
+
+    return subbass_energy
 
 
-def compute_rms_envelope(y: np.ndarray, sr: int, hop_length: int = 512) -> np.ndarray:
-    """Compute RMS energy envelope of audio."""
-    return librosa.feature.rms(y=y, hop_length=hop_length)[0]
+def compute_percussive_energy(y: np.ndarray, sr: int, hop_length: int = 512) -> np.ndarray:
+    """
+    Extract percussive component and compute its energy.
+    Drums/kicks will show up strongly in the percussive component.
+    """
+    # Harmonic-percussive separation
+    y_harmonic, y_percussive = librosa.effects.hpss(y)
+
+    # RMS energy of percussive component
+    perc_rms = librosa.feature.rms(y=y_percussive, hop_length=hop_length)[0]
+
+    return perc_rms
+
+
+def compute_spectral_flux(y: np.ndarray, sr: int, hop_length: int = 512) -> np.ndarray:
+    """
+    Compute spectral flux - measures how much the spectrum changes over time.
+    Large values indicate new frequency content appearing.
+    """
+    S = np.abs(librosa.stft(y, hop_length=hop_length))
+
+    # Compute difference between consecutive frames
+    flux = np.zeros(S.shape[1])
+    for i in range(1, S.shape[1]):
+        # Only count positive changes (new content appearing)
+        diff = S[:, i] - S[:, i-1]
+        flux[i] = np.sum(np.maximum(0, diff))
+
+    return flux
 
 
 def compute_onset_envelope(y: np.ndarray, sr: int, hop_length: int = 512) -> np.ndarray:
@@ -30,63 +69,79 @@ def compute_onset_envelope(y: np.ndarray, sr: int, hop_length: int = 512) -> np.
     return librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop_length)
 
 
-def get_bar_times(bpm: float, beats_per_bar: int = 4, max_bars: int = 16) -> List[float]:
-    """Calculate timestamps for bar boundaries given BPM."""
-    bar_duration = (60.0 / bpm) * beats_per_bar
-    return [bar_duration * i for i in range(1, max_bars + 1)]
-
-
-def get_energy_at_time(energy: np.ndarray, time: float, sr: int, hop_length: int,
-                       window_seconds: float = 2.0) -> float:
-    """Get average energy in a window around a specific time."""
-    frame = int(time * sr / hop_length)
-    window_frames = int(window_seconds * sr / hop_length)
-    start = max(0, frame - window_frames // 2)
-    end = min(len(energy), frame + window_frames // 2)
+def get_window_energy(signal: np.ndarray, center_frame: int, window_frames: int) -> float:
+    """Get average energy in a window around center_frame."""
+    start = max(0, center_frame - window_frames // 2)
+    end = min(len(signal), center_frame + window_frames // 2)
     if start >= end:
         return 0.0
-    return float(np.mean(energy[start:end]))
+    return float(np.mean(signal[start:end]))
 
 
-def analyze_downbeat_energy(
-    rms: np.ndarray,
+def analyze_downbeat_features(
+    subbass: np.ndarray,
+    percussive: np.ndarray,
+    spectral_flux: np.ndarray,
     onset: np.ndarray,
     downbeats: np.ndarray,
     sr: int,
     hop_length: int,
     min_time: float = 5.0,
-    max_time: float = 40.0
+    max_time: float = 60.0
 ) -> List[dict]:
     """
-    Analyze energy at each downbeat to find where the beat kicks in.
+    Analyze multiple features at each downbeat to find where the beat kicks in.
 
     Returns list of dicts with downbeat analysis.
     """
     valid_downbeats = downbeats[(downbeats >= min_time) & (downbeats <= max_time)]
 
     results = []
-    for i, db_time in enumerate(valid_downbeats):
-        # Get energy BEFORE this downbeat (previous 4 beats = ~1 bar)
-        before_time = db_time - 2.5
-        rms_before = get_energy_at_time(rms, before_time, sr, hop_length, 2.0)
-        onset_before = get_energy_at_time(onset, before_time, sr, hop_length, 2.0)
+    window_seconds = 2.0
+    window_frames = int(window_seconds * sr / hop_length)
 
-        # Get energy AFTER this downbeat (next 4 beats)
-        after_time = db_time + 1.0
-        rms_after = get_energy_at_time(rms, after_time, sr, hop_length, 2.0)
-        onset_after = get_energy_at_time(onset, after_time, sr, hop_length, 2.0)
+    for db_time in valid_downbeats:
+        frame = int(db_time * sr / hop_length)
+        before_frame = int((db_time - 2.5) * sr / hop_length)
+        after_frame = int((db_time + 1.0) * sr / hop_length)
 
-        # Calculate ratios
-        rms_ratio = rms_after / (rms_before + 0.001)
-        onset_ratio = onset_after / (onset_before + 0.001)
+        # Get features BEFORE this downbeat
+        subbass_before = get_window_energy(subbass, before_frame, window_frames)
+        perc_before = get_window_energy(percussive, before_frame, window_frames)
+        flux_before = get_window_energy(spectral_flux, before_frame, window_frames)
+        onset_before = get_window_energy(onset, before_frame, window_frames)
+
+        # Get features AFTER this downbeat
+        subbass_after = get_window_energy(subbass, after_frame, window_frames)
+        perc_after = get_window_energy(percussive, after_frame, window_frames)
+        flux_after = get_window_energy(spectral_flux, after_frame, window_frames)
+        onset_after = get_window_energy(onset, after_frame, window_frames)
+
+        # Calculate ratios (how much each feature increases)
+        eps = 0.001  # Avoid division by zero
+        subbass_ratio = subbass_after / (subbass_before + eps)
+        perc_ratio = perc_after / (perc_before + eps)
+        flux_ratio = flux_after / (flux_before + eps)
+        onset_ratio = onset_after / (onset_before + eps)
+
+        # Combined score emphasizing bass and percussion
+        # Weight sub-bass and percussion more heavily
+        combined_score = (
+            subbass_ratio * 2.0 +  # Bass is very important
+            perc_ratio * 2.0 +      # Percussion is very important
+            flux_ratio * 1.0 +      # Spectral change matters
+            onset_ratio * 1.0       # Onset strength
+        ) / 6.0
 
         results.append({
             'time': db_time,
-            'rms_ratio': rms_ratio,
+            'subbass_ratio': subbass_ratio,
+            'perc_ratio': perc_ratio,
+            'flux_ratio': flux_ratio,
             'onset_ratio': onset_ratio,
-            'combined': rms_ratio * onset_ratio,
-            'rms_after': rms_after,
-            'onset_after': onset_after
+            'combined_score': combined_score,
+            'subbass_after': subbass_after,
+            'perc_after': perc_after,
         })
 
     return results
@@ -96,18 +151,17 @@ def find_beat_drop_advanced(
     file_path: str,
     downbeats: np.ndarray,
     min_intro_length: float = 5.0,
-    max_intro_length: float = 40.0,
+    max_intro_length: float = 60.0,
     bpm: float = None
 ) -> Tuple[float, dict]:
     """
-    Find the beat drop by analyzing energy at downbeats and bar boundaries.
+    Find the beat drop by analyzing bass/percussion at downbeats.
 
-    Strategy:
-    1. Analyze energy ratio at each detected downbeat
-    2. Find the FIRST downbeat where:
-       - Combined (RMS * onset) ratio exceeds threshold, OR
-       - Energy level after downbeat is high (above median) AND ratio > 1.0
-    3. Snap to the actual downbeat time
+    Strategy for AI-generated beats:
+    1. These tracks often have consistent loudness throughout
+    2. The "drop" is when BASS specifically kicks in (kick drum, sub-bass)
+    3. Look for the FIRST downbeat where sub-bass is consistently high
+    4. Use a "sustained high bass" approach rather than ratio-based
 
     Args:
         file_path: Path to audio file
@@ -134,97 +188,150 @@ def find_beat_drop_advanced(
         while bpm < 70:
             bpm *= 2
 
-    # Compute features
-    rms = compute_rms_envelope(y, sr, hop_length)
+    # Compute features - focus on low frequencies
+    subbass = compute_subbass_energy(y, sr, hop_length)
+    percussive = compute_percussive_energy(y, sr, hop_length)
     onset = compute_onset_envelope(y, sr, hop_length)
 
-    # Analyze energy at each downbeat
-    db_analysis = analyze_downbeat_energy(
-        rms, onset, downbeats, sr, hop_length,
-        min_intro_length, max_intro_length
-    )
+    # Get valid downbeats in range
+    # Start looking from 5s minimum, but we'll analyze relative to earlier content
+    valid_downbeats = downbeats[(downbeats >= min_intro_length) & (downbeats <= max_intro_length)]
 
-    if not db_analysis:
-        # Fallback if no valid downbeats
+    if len(valid_downbeats) == 0:
         return min_intro_length, {'error': 'no_downbeats'}
 
-    # Calculate median energy levels (for "high energy" threshold)
-    all_rms_after = [d['rms_after'] for d in db_analysis]
-    all_onset_after = [d['onset_after'] for d in db_analysis]
-    median_rms = np.median(all_rms_after)
-    median_onset = np.median(all_onset_after)
+    # Also get downbeats from very early (2-5s) to compare against
+    early_downbeats = downbeats[(downbeats >= 2.0) & (downbeats < min_intro_length)]
 
-    # Find the FIRST downbeat that looks like a drop
-    # Criteria: High combined ratio OR (high energy AND some increase)
+    # Calculate baseline levels from first few seconds (likely intro)
+    intro_end_frame = int(min_intro_length * sr / hop_length)
+    intro_subbass = np.mean(subbass[:intro_end_frame]) if intro_end_frame > 0 else 0
+    intro_subbass_std = np.std(subbass[:intro_end_frame]) if intro_end_frame > 0 else 0
+    intro_perc = np.mean(percussive[:intro_end_frame]) if intro_end_frame > 0 else 0
+
+    # Calculate the 75th percentile of sub-bass (represents "full bass" level)
+    subbass_p75 = np.percentile(subbass, 75)
+    perc_p75 = np.percentile(percussive, 75)
+
+    # For each downbeat, check multiple features
+    window_frames = int(2.0 * sr / hop_length)
+
+    results = []
+    for db_time in valid_downbeats:
+        frame = int(db_time * sr / hop_length)
+
+        # Get features AFTER this downbeat (next 2 seconds)
+        start = frame
+        end = min(len(subbass), frame + window_frames)
+        if end <= start:
+            continue
+
+        subbass_level = np.mean(subbass[start:end])
+        subbass_std = np.std(subbass[start:end])  # Variance indicates "punchy" bass
+        perc_level = np.mean(percussive[start:end]) if end <= len(percussive) else 0
+
+        # Is sub-bass at "full" level?
+        subbass_full = subbass_level >= subbass_p75 * 0.7
+
+        # Compare to intro baseline
+        subbass_vs_intro = subbass_level / (intro_subbass + 0.001)
+        perc_vs_intro = perc_level / (intro_perc + 0.001)
+
+        # Bass "punchiness" - high variance means kick drum pattern (vs sustained bass)
+        bass_punchiness = subbass_std / (subbass_level + 0.001)
+
+        # Combined score: bass level + percussion + punchiness
+        combined = (
+            subbass_vs_intro * 0.4 +
+            perc_vs_intro * 0.4 +
+            (bass_punchiness * 10) * 0.2  # Scale punchiness
+        )
+
+        results.append({
+            'time': db_time,
+            'subbass_level': subbass_level,
+            'subbass_full': subbass_full,
+            'subbass_vs_intro': subbass_vs_intro,
+            'perc_level': perc_level,
+            'perc_vs_intro': perc_vs_intro,
+            'bass_punchiness': bass_punchiness,
+            'combined': combined,
+        })
+
+    if not results:
+        return min_intro_length, {'error': 'no_analysis'}
+
+    # NEW STRATEGY: Look for the biggest TRANSITION (change between consecutive downbeats)
+    # The drop is where the biggest positive change in features happens
+
+    # Calculate change between consecutive downbeats
+    for i in range(1, len(results)):
+        prev = results[i-1]
+        curr = results[i]
+
+        # Calculate the jump in features from previous to current
+        subbass_jump = curr['subbass_level'] - prev['subbass_level']
+        perc_jump = curr['perc_level'] - prev['perc_level']
+
+        # Normalize jumps relative to overall levels
+        subbass_jump_norm = subbass_jump / (np.mean([r['subbass_level'] for r in results]) + 0.001)
+        perc_jump_norm = perc_jump / (np.mean([r['perc_level'] for r in results]) + 0.001)
+
+        # Store the transition score
+        results[i]['transition_score'] = max(0, subbass_jump_norm) + max(0, perc_jump_norm)
+
+    # First result has no transition
+    results[0]['transition_score'] = 0
+
+    # Strategy 1: Find first downbeat with significant transition AND high absolute level
     drop_time = None
     drop_info = None
 
-    for analysis in db_analysis:
-        # Check if this looks like the drop
-        combined = analysis['combined']
-        rms_ratio = analysis['rms_ratio']
-        onset_ratio = analysis['onset_ratio']
-        rms_high = analysis['rms_after'] >= median_rms * 0.9
-        onset_high = analysis['onset_after'] >= median_onset * 0.9
+    transition_scores = [r['transition_score'] for r in results]
+    if max(transition_scores) > 0:
+        trans_p75 = np.percentile(transition_scores, 75)
 
-        # Drop detection rules:
-        # 1. Combined ratio is significant (both RMS and onset increase)
-        # 2. OR energy is high AND there's at least some increase
-        is_drop = (
-            combined > 1.35 or  # Clear energy jump
-            (rms_high and onset_high and rms_ratio > 1.05 and onset_ratio > 1.05)  # High energy with increase
-        )
+        for r in results:
+            # Drop when there's a significant transition AND bass is now high
+            if r['transition_score'] >= trans_p75 and r['subbass_full']:
+                drop_time = r['time']
+                drop_info = r
+                break
 
-        if is_drop:
-            drop_time = analysis['time']
-            drop_info = analysis
-            break
-
-    # Fallback: use downbeat with highest combined ratio
+    # Strategy 2: First downbeat where bass and percussion are BOTH significantly higher than intro
     if drop_time is None:
-        best = max(db_analysis, key=lambda x: x['combined'])
+        for r in results:
+            if r['subbass_vs_intro'] > 1.2 and r['perc_vs_intro'] > 1.2:
+                drop_time = r['time']
+                drop_info = r
+                break
+
+    # Strategy 3: First downbeat with full bass
+    if drop_time is None:
+        for r in results:
+            if r['subbass_full']:
+                drop_time = r['time']
+                drop_info = r
+                break
+
+    # Fallback: Downbeat with highest transition score, or highest combined if no transitions
+    if drop_time is None:
+        if max(transition_scores) > 0:
+            best = max(results, key=lambda x: x['transition_score'])
+        else:
+            best = max(results, key=lambda x: x['combined'])
         drop_time = best['time']
         drop_info = best
 
     debug_info = {
         'bpm': round(bpm, 1),
         'drop_time': round(drop_time, 3),
-        'rms_ratio': round(drop_info['rms_ratio'], 2) if drop_info else 0,
-        'onset_ratio': round(drop_info['onset_ratio'], 2) if drop_info else 0,
-        'combined': round(drop_info['combined'], 2) if drop_info else 0,
-        'final_drop': round(drop_time, 3)
+        'subbass_vs_intro': round(drop_info.get('subbass_vs_intro', 0), 2) if drop_info else 0,
+        'perc_vs_intro': round(drop_info.get('perc_vs_intro', 0), 2) if drop_info else 0,
+        'combined': round(drop_info.get('combined', 0), 2) if drop_info else 0,
     }
 
     return drop_time, debug_info
-
-
-def find_beat_drop_from_filename(file_path: str, downbeats: np.ndarray) -> Optional[float]:
-    """
-    Try to extract beat drop time from filename metadata.
-
-    Many AI-generated beat files encode the drop time in the filename, e.g.:
-        "Song Name (96 BPM - 00;20.1 - 03;21.0).mp3"
-
-    Returns the drop time snapped to nearest downbeat, or None if no metadata.
-    """
-    if parse_filename is None:
-        return None
-
-    filename = Path(file_path).name
-    metadata = parse_filename(filename)
-
-    if metadata is None:
-        return None
-
-    # Got metadata - snap to nearest downbeat
-    expected_drop = metadata.beat_drop_time
-
-    if len(downbeats) == 0:
-        return expected_drop
-
-    # Find closest downbeat to the expected drop time
-    idx = np.argmin(np.abs(downbeats - expected_drop))
-    return float(downbeats[idx])
 
 
 def find_beat_drop(
@@ -232,32 +339,26 @@ def find_beat_drop(
     downbeats: np.ndarray,
     energy_threshold_percentile: float = 70,
     max_intro_length: float = 60.0,
-    use_filename_metadata: bool = True
+    use_filename_metadata: bool = False  # Disabled by default now
 ) -> float:
     """
-    Find the beat drop time - first strong downbeat after intro.
+    Find the beat drop time - first strong downbeat where bass/drums kick in.
 
     Args:
         file_path: Path to audio file
         downbeats: Array of downbeat timestamps
         energy_threshold_percentile: (deprecated)
         max_intro_length: Maximum intro length to search
-        use_filename_metadata: If True, try to extract from filename first
+        use_filename_metadata: If True, try to extract from filename first (disabled)
 
     Returns:
         Beat drop time in seconds
     """
-    # Strategy 1: Try to get from filename metadata (most accurate for labeled files)
-    if use_filename_metadata:
-        metadata_drop = find_beat_drop_from_filename(file_path, downbeats)
-        if metadata_drop is not None:
-            return metadata_drop
-
-    # Strategy 2: Fall back to audio analysis
+    # Use audio analysis (no filename cheating!)
     drop_time, _ = find_beat_drop_advanced(
         file_path, downbeats,
         min_intro_length=5.0,
-        max_intro_length=min(40.0, max_intro_length)
+        max_intro_length=min(60.0, max_intro_length)
     )
     return drop_time
 
@@ -267,22 +368,3 @@ def find_beat_drop_simple(downbeats: np.ndarray, default_time: float = 0.0) -> f
     if len(downbeats) > 0:
         return float(downbeats[0])
     return default_time
-
-
-# Legacy function for compatibility
-def find_energy_threshold_crossing(
-    rms: np.ndarray,
-    sr: int,
-    hop_length: int,
-    threshold_percentile: float = 75,
-    min_time: float = 0.5
-) -> float:
-    """Find first time RMS exceeds threshold. (Legacy method)"""
-    threshold = np.percentile(rms, threshold_percentile)
-    min_frame = int(min_time * sr / hop_length)
-
-    for i in range(min_frame, len(rms)):
-        if rms[i] > threshold:
-            return i * hop_length / sr
-
-    return min_time
