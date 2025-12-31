@@ -1,0 +1,25 @@
+# Audio loading and basic analysis
+librosa>=0.10.0
+
+# Audio file I/O
+soundfile>=0.12.0
+
+# Numerical operations
+numpy>=1.24.0
+
+# Data validation
+pydantic>=2.0.0
+
+# CLI interface
+click>=8.0.0
+
+# Progress bars for batch processing
+tqdm>=4.65.0
+
+# For generating click track audio
+scipy>=1.10.0
+
+# Optional: Neural network beat/downbeat tracking (state-of-the-art)
+# Requires Python 3.9-3.11 (not compatible with 3.12+)
+# Install manually with: pip install cython numpy && pip install madmom
+# madmom>=0.16.1

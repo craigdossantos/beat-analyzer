@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Beat Analyzer - Verification UI</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-layout">
+      <!-- File Sidebar -->
+      <aside class="file-sidebar">
+        <div class="sidebar-header">
+          <h2>Files</h2>
+        </div>
+        <div class="sidebar-actions">
+          <input
+            type="file"
+            id="fileInput"
+            multiple
+            accept=".mp3,.wav,.ogg,.flac,.json"
+            class="hidden"
+          />
+          <button id="addFilesBtn" class="add-files-btn" type="button">
+            + Add Files
+          </button>
+          <button id="exportAllBtn" class="export-all-btn" disabled>
+            Export All
+          </button>
+        </div>
+        <div id="fileList" class="file-list">
+          <div class="empty-state">No files loaded</div>
+        </div>
+      </aside>
+
+      <!-- Main Content -->
+      <main class="main-content">
+        <div class="container">
+          <div class="header-row">
+            <h1>Beat Verification</h1>
+            <button id="helpBtn" class="help-btn" title="Show help">?</button>
+          </div>
+
+          <!-- Help Panel -->
+          <div id="helpPanel" class="help-panel hidden">
+            <h3>Keyboard Shortcuts</h3>
+            <div class="help-grid">
+              <div class="help-item"><kbd>Space</kbd> Play/Pause</div>
+              <div class="help-item"><kbd>S</kbd> Stop</div>
+              <div class="help-item"><kbd>Left/Right</kbd> Skip 5s</div>
+              <div class="help-item"><kbd>D</kbd> Jump to beat drop</div>
+              <div class="help-item"><kbd>C</kbd> Toggle click track</div>
+              <div class="help-item"><kbd>Esc</kbd> Clear selection</div>
+            </div>
+            <h3>Zoom Controls</h3>
+            <div class="help-grid">
+              <div class="help-item">
+                <kbd>⌘+</kbd> / <kbd>⌘-</kbd> Zoom in/out
+              </div>
+              <div class="help-item"><kbd>⌘0</kbd> Reset zoom</div>
+              <div class="help-item">Pinch trackpad to zoom</div>
+              <div class="help-item">Two-finger scroll to pan</div>
+            </div>
+            <h3>Region Selection</h3>
+            <p>
+              <kbd>Shift</kbd> + Click + Drag on waveform to select a region,
+              then pick the correct beat drop from the list.
+            </p>
+            <h3>Status Indicators</h3>
+            <div class="status-legend">
+              <div><span class="dot green"></span> Has JSON metadata</div>
+              <div>
+                <span class="dot yellow"></span> No JSON (needs metadata)
+              </div>
+              <div>
+                <span class="dot blue"></span> Modified (unsaved changes)
+              </div>
+            </div>
+          </div>
+
+          <div id="player" class="player hidden">
+            <!-- Waveform with beat markers and selection overlay -->
+            <div class="waveform-container">
+              <canvas id="waveform"></canvas>
+              <div id="playhead" class="playhead"></div>
+              <div id="beatMarkers" class="beat-markers"></div>
+              <div id="selectionOverlay" class="selection-overlay hidden"></div>
+            </div>
+
+            <!-- Selection hint -->
+            <div class="selection-hint">
+              <span
+                >Shift+Click+Drag on waveform to select region for beat
+                drop</span
+              >
+            </div>
+
+            <!-- Beat Drop Picker Panel -->
+            <div id="beatDropPicker" class="beat-drop-picker hidden">
+              <div class="picker-header">
+                <span class="picker-title">Select Beat Drop</span>
+                <span id="pickerTimeRange" class="picker-time-range"></span>
+                <button id="clearSelection" class="clear-selection-btn">
+                  Clear
+                </button>
+              </div>
+              <div id="downbeatOptions" class="downbeat-options"></div>
+            </div>
+
+            <!-- Beat indicator -->
+            <div class="beat-display">
+              <div id="beatIndicator" class="beat-indicator"></div>
+              <div class="beat-info">
+                <span class="beat-label">Beat</span>
+                <span id="currentBeat" class="beat-number">-</span>
+                <span class="beat-label">of</span>
+                <span id="beatsPerMeasure" class="beat-number">4</span>
+              </div>
+              <div class="measure-info">
+                <span class="beat-label">Measure</span>
+                <span id="currentMeasure" class="measure-number">-</span>
+              </div>
+            </div>
+
+            <!-- Playback controls -->
+            <div class="controls">
+              <button id="playBtn" title="Space to play/pause">Play</button>
+              <button id="stopBtn" title="S to stop">Stop</button>
+              <button id="skipBack" title="Left arrow">-5s</button>
+              <button id="skipForward" title="Right arrow">+5s</button>
+              <div class="time-display">
+                <span id="currentTime">0:00.000</span>
+                <span>/</span>
+                <span id="duration">0:00</span>
+              </div>
+              <div class="click-track-toggle">
+                <label>
+                  <input type="checkbox" id="clickTrack" checked />
+                  Click Track
+                </label>
+              </div>
+              <div class="volume-control">
+                <label for="clickVolume">Click Vol:</label>
+                <input
+                  type="range"
+                  id="clickVolume"
+                  min="0"
+                  max="100"
+                  value="50"
+                />
+              </div>
+            </div>
+
+            <!-- Metadata display -->
+            <div class="metadata">
+              <div class="stat">
+                <span class="label">BPM:</span>
+                <span id="bpm">--</span>
+              </div>
+              <div class="stat">
+                <span class="label">Beat Drop:</span>
+                <input type="number" id="beatDrop" step="0.001" min="0" />
+                <span>s</span>
+                <button id="setDropBtn" class="small-btn">
+                  Set to Current
+                </button>
+              </div>
+              <div class="stat">
+                <span class="label">Confidence:</span>
+                <span id="confidence">--</span>
+              </div>
+              <div class="stat">
+                <span class="label">Total Beats:</span>
+                <span id="totalBeats">--</span>
+              </div>
+              <div class="stat">
+                <span class="label">Downbeats:</span>
+                <span id="totalDownbeats">--</span>
+              </div>
+              <div class="stat">
+                <span class="label">Song ID:</span>
+                <span id="songId">--</span>
+              </div>
+            </div>
+
+            <!-- Actions -->
+            <div class="actions">
+              <button id="jumpDrop">Jump to Beat Drop</button>
+              <button id="jumpStart">Jump to Start</button>
+              <button id="quickSaveBtn" title="Download with same filename">
+                Quick Save
+              </button>
+              <button
+                id="saveAsBtn"
+                class="secondary-btn"
+                title="Choose save location"
+              >
+                Save As...
+              </button>
+              <button id="loadJsonBtn" class="secondary-btn">Load JSON</button>
+              <input
+                type="file"
+                id="manualJsonInput"
+                accept=".json"
+                class="hidden"
+              />
+            </div>
+
+            <!-- Keyboard shortcuts help -->
+            <div class="shortcuts-help">
+              <strong>Shortcuts:</strong>
+              <span>Space = Play/Pause</span>
+              <span>S = Stop</span>
+              <span>Left/Right = Skip 5s</span>
+              <span>D = Jump to drop</span>
+              <span>C = Toggle click track</span>
+              <span>Shift+Drag = Select region</span>
+              <span>Esc = Clear selection</span>
+            </div>
+          </div>
+
+          <!-- Empty state when no file selected -->
+          <div id="emptyState" class="empty-player-state">
+            <p>Select a file from the sidebar or add files to get started</p>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

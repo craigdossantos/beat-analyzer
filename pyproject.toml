@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "beat-analyzer"
+version = "0.1.0"
+description = "Extract beat timing metadata from MP3 files for the FreestyleFlow mobile app"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "FreestyleFlow Team"}
+]
+keywords = ["audio", "beat-detection", "music", "tempo", "bpm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Analysis",
+]
+
+dependencies = [
+    "librosa>=0.10.0",
+    "soundfile>=0.12.0",
+    "numpy>=1.24.0",
+    "pydantic>=2.0.0",
+    "click>=8.0.0",
+    "tqdm>=4.65.0",
+    "scipy>=1.10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+# madmom provides better beat detection but requires Python 3.9-3.11
+madmom = [
+    "cython",
+    "madmom>=0.16.1",
+]
+
+[project.scripts]
+analyze-song = "scripts.analyze_song:main"
+batch-analyze = "scripts.batch_analyze:main"
+generate-click-track = "scripts.generate_click_track:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "scripts*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
